@@ -1,36 +1,89 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# feature-flags
 
-## Getting Started
+**Open-source alternative to LaunchDarkly.** LaunchDarklyの年間$71,847を、$15/月のVPSコストに。
 
-First, run the development server:
+[![Deploy with Vercel](https://vercel.com/button)](https://vercel.com/new/clone?repository-url=https://github.com/postcabinets-jp/feature-flags&env=NEXT_PUBLIC_SUPABASE_URL,NEXT_PUBLIC_SUPABASE_ANON_KEY,SUPABASE_SERVICE_ROLE_KEY,NEXT_PUBLIC_APP_URL&envDescription=Supabase%20project%20credentials&project-name=feature-flags&repository-name=feature-flags)
+
+## Features
+
+- **Boolean / String / Number / JSON** の4型フラグ対応
+- **環境管理** — Development / Staging / Production + カスタム環境を無制限追加
+- **段階的ロールアウト** — ユーザーハッシュベースの再現性ある%ロールアウト
+- **ターゲティングルール** — ユーザーID・メール・カスタム属性でセグメント
+- **即時キルスイッチ** — 全環境でフラグをOFFにするワンクリック緊急停止
+- **フラグ腐敗スキャナー** — 60日超変更なしのフラグを自動検出・通知
+- **監査ログ** — 全変更の「誰が・いつ・何を」を完全記録
+- **APIキー管理** — SDK（読み取り専用）とManagement（書き込み）を分離発行
+- **チーム権限管理** — Owner / Admin / Editor / Viewer の4ロール
+- **セルフホスト対応** — Docker Compose 1コマンドで全スタック起動
+
+## Quick Start
+
+### クラウド版（Vercel + Supabase）
+
+1. 上の **Deploy with Vercel** ボタンをクリック
+2. [Supabase](https://supabase.com) でプロジェクトを作成し、環境変数を入力
+3. Supabase SQL Editor で `supabase/migrations/` のファイルを順番に実行
+4. `/register` にアクセスしてアカウントを作成
+
+### セルフホスト（Docker Compose）
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+git clone https://github.com/postcabinets-jp/feature-flags
+cd feature-flags
+cp .env.example .env  # 編集してSupabaseの認証情報を入力
+docker compose up -d  # http://localhost:3000 で起動
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### ローカル開発
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+npm install
+cp .env.example .env.local
+npm run dev
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+## Environment Variables
 
-## Learn More
+```env
+NEXT_PUBLIC_SUPABASE_URL=https://your-project.supabase.co
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your-anon-key
+SUPABASE_SERVICE_ROLE_KEY=your-service-role-key
+NEXT_PUBLIC_APP_URL=http://localhost:3000
+```
 
-To learn more about Next.js, take a look at the following resources:
+## Database Setup
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+Supabase SQL Editorで順番に実行:
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+```
+supabase/migrations/001_initial_schema.sql
+supabase/migrations/002_rls_policies.sql
+supabase/seed.sql  # (任意) サンプルデータ
+```
 
-## Deploy on Vercel
+## Tech Stack
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+| 層 | 技術 |
+|---|---|
+| Frontend | Next.js 15 (App Router) + TypeScript strict |
+| UI | Tailwind CSS v4 + shadcn/ui |
+| Backend | Supabase (PostgreSQL + Auth + RLS) |
+| Auth | Supabase Auth (Email/Password + Google OAuth) |
+| Deploy | Vercel / Docker Compose |
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+## Comparison
+
+| | feature-flags (OSS) | LaunchDarkly Foundation | Statsig Pro | ConfigCat Smart |
+|---|---|---|---|---|
+| 月額 | $0（セルフホスト）/ $39〜（クラウド） | $1,000〜 | $150〜 | $325 |
+| セルフホスト | ✅ | ❌ | ❌ | ❌ |
+| フラグ腐敗検出 | ✅ 自動通知 | 手動のみ | ❌ | ❌ |
+
+## License
+
+MIT
+
+---
+
+Built by [POST CABINETS](https://postcabinets.co.jp)
