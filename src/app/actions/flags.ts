@@ -2,37 +2,119 @@
 
 import { revalidatePath } from "next/cache";
 import { createClient } from "@/lib/supabase/server";
-import type { Database, Json } from "@/types/database";
+import type { Json } from "@/types/database";
+import { z } from "zod";
 
-type FlagInsert = Database["public"]["Tables"]["feature_flags"]["Insert"];
-type FlagConfigUpdate = Database["public"]["Tables"]["flag_configurations"]["Update"];
+// ── Schemas ──────────────────────────────────────────────────────────
+
+const FlagKeySchema = z
+  .string()
+  .min(1, "フラグキーは必須です")
+  .regex(/^[a-z0-9-_]+$/, "小文字英数字・ハイフン・アンダースコアのみ使用可能");
+
+const CreateFlagSchema = z.object({
+  project_id: z.string().uuid("不正なプロジェクトIDです"),
+  key: FlagKeySchema,
+  name: z.string().min(1, "表示名は必須です").max(200),
+  description: z.string().max(1000).optional().default(""),
+  flag_type: z.enum(["boolean", "string", "number", "json"]),
+  tags: z.string().optional().default(""),
+});
+
+const UpdateFlagDetailsSchema = z.object({
+  name: z.string().min(1, "表示名は必須です").max(200),
+  description: z.string().max(1000).optional().default(""),
+  tags: z.string().optional().default(""),
+});
+
+const UpdateFlagConfigSchema = z.object({
+  enabled: z.boolean().optional(),
+  default_value: z.any().optional(),
+  rollout_percent: z.number().min(0).max(100).nullable().optional(),
+  rules: z.any().optional(),
+});
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+async function requireAuth() {
+  const supabase = await createClient();
+  const {
+    data: { user },
+  } = await supabase.auth.getUser();
+  if (!user) throw new Error("Unauthorized");
+  return { supabase, user };
+}
+
+async function writeAuditLog(
+  supabase: Awaited<ReturnType<typeof createClient>>,
+  params: {
+    flagId: string;
+    environmentId?: string;
+    userId: string;
+    action: string;
+    oldValue?: unknown;
+    newValue?: unknown;
+  }
+) {
+  const { data: flag } = await supabase
+    .from("feature_flags")
+    .select("project_id")
+    .eq("id", params.flagId)
+    .single();
+  if (!flag) return;
+
+  const { data: project } = await supabase
+    .from("projects")
+    .select("organization_id")
+    .eq("id", flag.project_id)
+    .single();
+  if (!project) return;
+
+  await supabase.from("audit_logs").insert({
+    organization_id: project.organization_id,
+    project_id: flag.project_id,
+    flag_id: params.flagId,
+    environment_id: params.environmentId ?? null,
+    actor_id: params.userId,
+    action: params.action,
+    old_value: (params.oldValue ?? null) as Json,
+    new_value: (params.newValue ?? null) as Json,
+  });
+}
+
+// ── Actions ─────────────────────────────────────────────────────────
 
 export async function createFlag(formData: FormData) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: "Unauthorized" };
+  const parsed = CreateFlagSchema.safeParse({
+    project_id: formData.get("project_id"),
+    key: formData.get("key"),
+    name: formData.get("name"),
+    description: formData.get("description"),
+    flag_type: formData.get("flag_type"),
+    tags: formData.get("tags"),
+  });
 
-  const projectId = formData.get("project_id") as string;
-  const key = formData.get("key") as string;
-  const name = formData.get("name") as string;
-  const description = formData.get("description") as string;
-  const flagType = formData.get("flag_type") as FlagInsert["flag_type"];
-  const tagsRaw = formData.get("tags") as string;
-  const tags = tagsRaw ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean) : [];
-
-  // Validate key format
-  if (!/^[a-z0-9-_]+$/.test(key)) {
-    return { error: "フラグキーは小文字英数字・ハイフン・アンダースコアのみ使用可能です" };
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0].message };
   }
+
+  const { supabase, user } = await requireAuth();
+  const { project_id, key, name, description, flag_type, tags: tagsRaw } = parsed.data;
+  const tags = tagsRaw
+    ? tagsRaw
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+    : [];
 
   const { data, error } = await supabase
     .from("feature_flags")
     .insert({
-      project_id: projectId,
+      project_id,
       key,
       name,
       description: description || null,
-      flag_type: flagType,
+      flag_type,
       tags,
       created_by: user.id,
     })
@@ -50,12 +132,17 @@ export async function createFlag(formData: FormData) {
   const { data: environments } = await supabase
     .from("environments")
     .select("id")
-    .eq("project_id", projectId);
+    .eq("project_id", project_id);
 
   if (environments?.length && data) {
-    const defaultValue = flagType === "boolean" ? "false" :
-      flagType === "number" ? "0" :
-      flagType === "string" ? '""' : "{}";
+    const defaultValue =
+      flag_type === "boolean"
+        ? "false"
+        : flag_type === "number"
+          ? "0"
+          : flag_type === "string"
+            ? '""'
+            : "{}";
 
     await supabase.from("flag_configurations").insert(
       environments.map((env) => ({
@@ -68,18 +155,31 @@ export async function createFlag(formData: FormData) {
     );
   }
 
-  revalidatePath(`/dashboard`);
+  // Audit
+  if (data) {
+    await writeAuditLog(supabase, {
+      flagId: data.id,
+      userId: user.id,
+      action: "flag.created",
+      newValue: { key, name, flag_type, tags },
+    });
+  }
+
+  revalidatePath("/dashboard");
   return { data };
 }
 
 export async function updateFlagConfig(
   flagId: string,
   environmentId: string,
-  updates: Partial<FlagConfigUpdate>
+  updates: z.infer<typeof UpdateFlagConfigSchema>
 ) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: "Unauthorized" };
+  const parsed = UpdateFlagConfigSchema.safeParse(updates);
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0].message };
+  }
+
+  const { supabase, user } = await requireAuth();
 
   const { data: existing } = await supabase
     .from("flag_configurations")
@@ -88,62 +188,85 @@ export async function updateFlagConfig(
     .eq("environment_id", environmentId)
     .single();
 
+  type FlagConfigInsert = import("@/types/database").Database["public"]["Tables"]["flag_configurations"]["Insert"];
+  const upsertPayload: FlagConfigInsert = {
+    flag_id: flagId,
+    environment_id: environmentId,
+    updated_by: user.id,
+    updated_at: new Date().toISOString(),
+  };
+  if (parsed.data.enabled !== undefined) upsertPayload.enabled = parsed.data.enabled;
+  if (parsed.data.default_value !== undefined) upsertPayload.default_value = parsed.data.default_value as Json;
+  if (parsed.data.rollout_percent !== undefined) upsertPayload.rollout_percent = parsed.data.rollout_percent;
+  if (parsed.data.rules !== undefined) upsertPayload.rules = parsed.data.rules as Json;
+
   const { error } = await supabase
     .from("flag_configurations")
-    .upsert({
-      flag_id: flagId,
-      environment_id: environmentId,
-      ...updates,
-      updated_by: user.id,
-      updated_at: new Date().toISOString(),
-    });
+    .upsert(upsertPayload);
 
   if (error) return { error: error.message };
 
-  // Write audit log
-  const { data: flag } = await supabase
-    .from("feature_flags")
-    .select("project_id, key")
-    .eq("id", flagId)
-    .single();
+  const action =
+    parsed.data.enabled !== undefined
+      ? parsed.data.enabled
+        ? "flag.enabled"
+        : "flag.disabled"
+      : "flag.targeting_updated";
 
-  if (flag) {
-    const { data: project } = await supabase
-      .from("projects")
-      .select("organization_id")
-      .eq("id", flag.project_id)
-      .single();
-
-    if (project) {
-      const action = updates.enabled !== undefined
-        ? updates.enabled ? "flag.enabled" : "flag.disabled"
-        : "flag.targeting_updated";
-
-      await supabase.from("audit_logs").insert({
-        organization_id: project.organization_id,
-        project_id: flag.project_id,
-        flag_id: flagId,
-        environment_id: environmentId,
-        actor_id: user.id,
-        action,
-        old_value: existing as unknown as Json,
-        new_value: updates as unknown as Json,
-      });
-    }
-  }
+  await writeAuditLog(supabase, {
+    flagId,
+    environmentId,
+    userId: user.id,
+    action,
+    oldValue: existing,
+    newValue: parsed.data,
+  });
 
   revalidatePath("/dashboard");
   return { success: true };
 }
 
-export async function toggleFlag(flagId: string, environmentId: string, enabled: boolean) {
-  return updateFlagConfig(flagId, environmentId, { enabled });
+export async function toggleFlag(
+  flagId: string,
+  environmentId: string,
+  enabled: boolean
+) {
+  const validated = z.boolean().safeParse(enabled);
+  if (!validated.success) return { error: "不正な値です" };
+  return updateFlagConfig(flagId, environmentId, { enabled: validated.data });
+}
+
+export async function updateRolloutPercent(
+  flagId: string,
+  environmentId: string,
+  percent: number
+) {
+  const validated = z.number().min(0).max(100).safeParse(percent);
+  if (!validated.success) return { error: "ロールアウト率は0〜100の範囲で指定してください" };
+  return updateFlagConfig(flagId, environmentId, {
+    rollout_percent: validated.data,
+  });
+}
+
+export async function updateDefaultValue(
+  flagId: string,
+  environmentId: string,
+  rawValue: string
+) {
+  let parsed: Json;
+  try {
+    parsed = JSON.parse(rawValue) as Json;
+  } catch {
+    parsed = rawValue;
+  }
+  return updateFlagConfig(flagId, environmentId, { default_value: parsed });
 }
 
 export async function killSwitchFlag(flagId: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: "Unauthorized" };
+  const idParsed = z.string().uuid().safeParse(flagId);
+  if (!idParsed.success) return { error: "不正なフラグIDです" };
+
+  const { supabase, user } = await requireAuth();
 
   const { data: configs } = await supabase
     .from("flag_configurations")
@@ -156,14 +279,22 @@ export async function killSwitchFlag(flagId: string) {
     await updateFlagConfig(flagId, config.environment_id, { enabled: false });
   }
 
+  await writeAuditLog(supabase, {
+    flagId,
+    userId: user.id,
+    action: "flag.kill_switch",
+    newValue: { all_environments_disabled: true },
+  });
+
   revalidatePath("/dashboard");
   return { success: true };
 }
 
 export async function archiveFlag(flagId: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: "Unauthorized" };
+  const idParsed = z.string().uuid().safeParse(flagId);
+  if (!idParsed.success) return { error: "不正なフラグIDです" };
+
+  const { supabase, user } = await requireAuth();
 
   const { error } = await supabase
     .from("feature_flags")
@@ -172,14 +303,28 @@ export async function archiveFlag(flagId: string) {
 
   if (error) return { error: error.message };
 
+  await writeAuditLog(supabase, {
+    flagId,
+    userId: user.id,
+    action: "flag.archived",
+  });
+
   revalidatePath("/dashboard");
   return { success: true };
 }
 
 export async function deleteFlag(flagId: string) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: "Unauthorized" };
+  const idParsed = z.string().uuid().safeParse(flagId);
+  if (!idParsed.success) return { error: "不正なフラグIDです" };
+
+  const { supabase, user } = await requireAuth();
+
+  // Audit before deletion (flag data will be gone after)
+  await writeAuditLog(supabase, {
+    flagId,
+    userId: user.id,
+    action: "flag.deleted",
+  });
 
   const { error } = await supabase
     .from("feature_flags")
@@ -193,14 +338,30 @@ export async function deleteFlag(flagId: string) {
 }
 
 export async function updateFlagDetails(flagId: string, formData: FormData) {
-  const supabase = await createClient();
-  const { data: { user } } = await supabase.auth.getUser();
-  if (!user) return { error: "Unauthorized" };
+  const parsed = UpdateFlagDetailsSchema.safeParse({
+    name: formData.get("name"),
+    description: formData.get("description"),
+    tags: formData.get("tags"),
+  });
 
-  const name = formData.get("name") as string;
-  const description = formData.get("description") as string;
-  const tagsRaw = formData.get("tags") as string;
-  const tags = tagsRaw ? tagsRaw.split(",").map((t) => t.trim()).filter(Boolean) : [];
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0].message };
+  }
+
+  const { supabase, user } = await requireAuth();
+  const { name, description, tags: tagsRaw } = parsed.data;
+  const tags = tagsRaw
+    ? tagsRaw
+        .split(",")
+        .map((t) => t.trim())
+        .filter(Boolean)
+    : [];
+
+  const { data: oldFlag } = await supabase
+    .from("feature_flags")
+    .select("name, description, tags")
+    .eq("id", flagId)
+    .single();
 
   const { error } = await supabase
     .from("feature_flags")
@@ -208,6 +369,14 @@ export async function updateFlagDetails(flagId: string, formData: FormData) {
     .eq("id", flagId);
 
   if (error) return { error: error.message };
+
+  await writeAuditLog(supabase, {
+    flagId,
+    userId: user.id,
+    action: "flag.details_updated",
+    oldValue: oldFlag,
+    newValue: { name, description, tags },
+  });
 
   revalidatePath("/dashboard");
   return { success: true };

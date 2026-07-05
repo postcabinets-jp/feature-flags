@@ -1,8 +1,14 @@
 "use client";
 
 import { useState, useTransition } from "react";
-import Link from "next/link";
-import { toggleFlag, updateFlagConfig, killSwitchFlag, archiveFlag } from "@/app/actions/flags";
+import {
+  toggleFlag,
+  updateRolloutPercent,
+  updateDefaultValue,
+  killSwitchFlag,
+  archiveFlag,
+  deleteFlag,
+} from "@/app/actions/flags";
 import type { Database, Json } from "@/types/database";
 
 type Flag = Database["public"]["Tables"]["feature_flags"]["Row"];
@@ -31,6 +37,9 @@ function actionLabel(action: string) {
     "flag.disabled": "無効化",
     "flag.targeting_updated": "ターゲティング更新",
     "flag.archived": "アーカイブ",
+    "flag.deleted": "削除",
+    "flag.kill_switch": "キルスイッチ",
+    "flag.details_updated": "詳細更新",
   };
   return labels[action] ?? action;
 }
@@ -55,6 +64,7 @@ export default function FlagDetailClient({
   );
   const [activeTab, setActiveTab] = useState<"config" | "history">("config");
   const [archiving, setArchiving] = useState(false);
+  const [deleting, setDeleting] = useState(false);
 
   function handleToggle(envId: string, currentEnabled: boolean) {
     setPendingEnvs((p) => new Set(p).add(envId));
@@ -77,24 +87,14 @@ export default function FlagDetailClient({
   function handleRolloutSave(envId: string) {
     const percent = rolloutValues[envId] ?? 100;
     startTransition(async () => {
-      await updateFlagConfig(flag.id, envId, {
-        rollout_percent: percent,
-      });
+      await updateRolloutPercent(flag.id, envId, percent);
     });
   }
 
   function handleDefaultValueSave(envId: string) {
     const raw = defaultValues[envId] ?? "";
-    let parsed: Json;
-    try {
-      parsed = JSON.parse(raw) as Json;
-    } catch {
-      parsed = raw;
-    }
     startTransition(async () => {
-      await updateFlagConfig(flag.id, envId, {
-        default_value: parsed,
-      });
+      await updateDefaultValue(flag.id, envId, raw);
     });
   }
 
@@ -109,6 +109,17 @@ export default function FlagDetailClient({
     if (!confirm("このフラグをアーカイブしますか？一覧から非表示になります。")) return;
     setArchiving(true);
     await archiveFlag(flag.id);
+  }
+
+  async function handleDelete() {
+    if (!confirm("このフラグを完全に削除しますか？この操作は元に戻せません。")) return;
+    setDeleting(true);
+    const result = await deleteFlag(flag.id);
+    if (result.error) {
+      setDeleting(false);
+      alert(result.error);
+    }
+    // On success, the page will revalidate and redirect
   }
 
   return (
@@ -160,6 +171,13 @@ export default function FlagDetailClient({
                 className="px-3 py-1.5 border border-gray-200 text-gray-600 text-sm rounded-lg hover:bg-gray-50 transition-colors disabled:opacity-50"
               >
                 アーカイブ
+              </button>
+              <button
+                onClick={handleDelete}
+                disabled={deleting}
+                className="px-3 py-1.5 border border-red-200 text-red-600 text-sm rounded-lg hover:bg-red-50 transition-colors disabled:opacity-50"
+              >
+                {deleting ? "削除中..." : "削除"}
               </button>
             </div>
           )}
@@ -322,7 +340,7 @@ export default function FlagDetailClient({
                 <div key={log.id} className="px-5 py-3 flex items-start gap-3">
                   <div className={`w-2 h-2 rounded-full mt-2 shrink-0 ${
                     log.action.includes("enabled") ? "bg-green-500" :
-                    log.action.includes("disabled") ? "bg-red-500" : "bg-blue-500"
+                    log.action.includes("disabled") || log.action.includes("kill") ? "bg-red-500" : "bg-blue-500"
                   }`} />
                   <div className="flex-1 min-w-0">
                     <div className="flex items-center justify-between">

@@ -3,13 +3,44 @@
 import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { revalidatePath } from "next/cache";
+import { z } from "zod";
+
+// ── Schemas ──────────────────────────────────────────────────────────
+
+const SignInSchema = z.object({
+  email: z.string().email("有効なメールアドレスを入力してください"),
+  password: z.string().min(1, "パスワードは必須です"),
+});
+
+const SignUpSchema = z.object({
+  email: z.string().email("有効なメールアドレスを入力してください"),
+  password: z.string().min(8, "パスワードは8文字以上必要です"),
+  full_name: z.string().min(1, "名前は必須です").max(100),
+  org_name: z.string().min(1, "組織名は必須です").max(100),
+});
+
+const ResetPasswordSchema = z.object({
+  email: z.string().email("有効なメールアドレスを入力してください"),
+});
+
+const UpdatePasswordSchema = z.object({
+  password: z.string().min(8, "パスワードは8文字以上必要です"),
+});
+
+// ── Actions ─────────────────────────────────────────────────────────
 
 export async function signIn(formData: FormData) {
-  const email = formData.get("email") as string;
-  const password = formData.get("password") as string;
+  const parsed = SignInSchema.safeParse({
+    email: formData.get("email"),
+    password: formData.get("password"),
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0].message };
+  }
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.signInWithPassword({ email, password });
+  const { error } = await supabase.auth.signInWithPassword(parsed.data);
 
   if (error) {
     return { error: error.message };
@@ -19,18 +50,25 @@ export async function signIn(formData: FormData) {
 }
 
 export async function signUp(formData: FormData) {
-  const email = formData.get("email") as string;
-  const password = formData.get("password") as string;
-  const fullName = formData.get("full_name") as string;
-  const orgName = formData.get("org_name") as string;
+  const parsed = SignUpSchema.safeParse({
+    email: formData.get("email"),
+    password: formData.get("password"),
+    full_name: formData.get("full_name"),
+    org_name: formData.get("org_name"),
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0].message };
+  }
 
   const supabase = await createClient();
+  const { email, password, full_name, org_name } = parsed.data;
 
   const { data, error } = await supabase.auth.signUp({
     email,
     password,
     options: {
-      data: { full_name: fullName },
+      data: { full_name },
     },
   });
 
@@ -40,14 +78,14 @@ export async function signUp(formData: FormData) {
 
   if (data.user) {
     // Create organization and add user as owner
-    const slug = orgName
+    const slug = org_name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, "-")
       .replace(/^-|-$/g, "");
 
     const { data: org, error: orgError } = await supabase
       .from("organizations")
-      .insert({ name: orgName, slug: `${slug}-${data.user.id.slice(0, 8)}` })
+      .insert({ name: org_name, slug: `${slug}-${data.user.id.slice(0, 8)}` })
       .select()
       .single();
 
@@ -70,10 +108,16 @@ export async function signOut() {
 }
 
 export async function resetPassword(formData: FormData) {
-  const email = formData.get("email") as string;
+  const parsed = ResetPasswordSchema.safeParse({
+    email: formData.get("email"),
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0].message };
+  }
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.resetPasswordForEmail(email, {
+  const { error } = await supabase.auth.resetPasswordForEmail(parsed.data.email, {
     redirectTo: `${process.env.NEXT_PUBLIC_APP_URL}/auth/callback?next=/reset-password`,
   });
 
@@ -85,10 +129,16 @@ export async function resetPassword(formData: FormData) {
 }
 
 export async function updatePassword(formData: FormData) {
-  const password = formData.get("password") as string;
+  const parsed = UpdatePasswordSchema.safeParse({
+    password: formData.get("password"),
+  });
+
+  if (!parsed.success) {
+    return { error: parsed.error.issues[0].message };
+  }
 
   const supabase = await createClient();
-  const { error } = await supabase.auth.updateUser({ password });
+  const { error } = await supabase.auth.updateUser({ password: parsed.data.password });
 
   if (error) {
     return { error: error.message };

@@ -1,7 +1,7 @@
 "use client";
 
-import { useState } from "react";
-import { createEnvironment } from "@/app/actions/organizations";
+import { useState, useTransition } from "react";
+import { createEnvironment, deleteEnvironment } from "@/app/actions/organizations";
 import type { Database } from "@/types/database";
 
 type Environment = Database["public"]["Tables"]["environments"]["Row"];
@@ -54,6 +54,7 @@ export default function EnvironmentsClient({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [showSdkKeys, setShowSdkKeys] = useState<Record<string, boolean>>({});
+  const [, startTransition] = useTransition();
 
   async function handleSubmit(formData: FormData) {
     setLoading(true);
@@ -67,6 +68,13 @@ export default function EnvironmentsClient({
       setShowNew(false);
       setLoading(false);
     }
+  }
+
+  function handleDelete(envId: string, envName: string) {
+    if (!confirm(`環境「${envName}」を削除しますか？この操作は元に戻せません。`)) return;
+    startTransition(async () => {
+      await deleteEnvironment(envId);
+    });
   }
 
   function toggleSdkKey(envId: string) {
@@ -104,6 +112,18 @@ export default function EnvironmentsClient({
                   <span className="text-xs text-gray-400 font-mono">{env.slug}</span>
                 </div>
               </div>
+
+              {canAdmin && (
+                <button
+                  onClick={() => handleDelete(env.id, env.name)}
+                  className="p-1.5 rounded hover:bg-red-50 text-gray-400 hover:text-red-500 transition-colors"
+                  title="環境を削除"
+                >
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                  </svg>
+                </button>
+              )}
             </div>
 
             <div className="mt-4 space-y-3">
